@@ -335,8 +335,15 @@ fn main() -> Result<()> {
         };
         est.max(1.0) as usize // truncation, matching Python's int()
     };
-
     info!("Target audio tokens: {num_target_tokens}");
+
+    if num_target_tokens < 30 {
+        tracing::warn!(
+            "Very short text ({} tokens). The model may produce low-quality \
+             audio for texts shorter than ~5 words. Consider adding more content.",
+            num_target_tokens
+        );
+    }
 
     // 8. Validate instruct and resolve language
     let use_zh = args.text.chars().any(is_cjk);
