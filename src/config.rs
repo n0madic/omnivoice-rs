@@ -1,5 +1,14 @@
 use serde::Deserialize;
 
+/// Generates a named function returning a constant default value for serde.
+macro_rules! serde_default {
+    ($name:ident, $ty:ty, $val:expr) => {
+        fn $name() -> $ty {
+            $val
+        }
+    };
+}
+
 // ---------------------------------------------------------------------------
 // OmniVoice top-level config (config.json)
 // ---------------------------------------------------------------------------
@@ -17,15 +26,9 @@ pub struct OmniVoiceConfig {
     pub llm_config: Qwen3Config,
 }
 
-fn default_audio_vocab_size() -> usize {
-    1025
-}
-fn default_audio_mask_id() -> usize {
-    1024
-}
-fn default_num_audio_codebook() -> usize {
-    8
-}
+serde_default!(default_audio_vocab_size, usize, 1025);
+serde_default!(default_audio_mask_id, usize, 1024);
+serde_default!(default_num_audio_codebook, usize, 8);
 fn default_audio_codebook_weights() -> Vec<f64> {
     vec![8.0, 8.0, 6.0, 6.0, 4.0, 4.0, 2.0, 2.0]
 }
@@ -68,18 +71,10 @@ pub struct Qwen3Config {
     pub tie_word_embeddings: bool,
 }
 
-fn default_head_dim() -> usize {
-    128
-}
-fn default_max_position_embeddings() -> usize {
-    40960
-}
-fn default_rope_theta() -> f64 {
-    1_000_000.0
-}
-fn default_rms_norm_eps() -> f64 {
-    1e-6
-}
+serde_default!(default_head_dim, usize, 128);
+serde_default!(default_max_position_embeddings, usize, 40960);
+serde_default!(default_rope_theta, f64, 1_000_000.0);
+serde_default!(default_rms_norm_eps, f64, 1e-6);
 fn default_hidden_act() -> String {
     "silu".to_string()
 }
@@ -117,12 +112,8 @@ pub struct HiggsAudioV2Config {
     pub semantic_model_config: Option<HuBERTConfig>,
 }
 
-fn default_sample_rate() -> usize {
-    24000
-}
-fn default_kernel_size() -> usize {
-    3
-}
+serde_default!(default_sample_rate, usize, 24000);
+serde_default!(default_kernel_size, usize, 3);
 fn default_channel_ratios() -> Vec<f64> {
     vec![1.0, 1.0]
 }
@@ -132,24 +123,14 @@ fn default_strides() -> Vec<usize> {
 fn default_block_dilations() -> Vec<usize> {
     vec![1, 1]
 }
-fn default_unit_kernel_size() -> usize {
-    3
-}
-fn default_codebook_size() -> usize {
-    1024
-}
-fn default_codebook_dim() -> usize {
-    64
-}
+serde_default!(default_unit_kernel_size, usize, 3);
+serde_default!(default_codebook_size, usize, 1024);
+serde_default!(default_codebook_dim, usize, 64);
 fn default_target_bandwidths() -> Vec<f64> {
     vec![0.5, 1.0, 1.5, 2.0, 4.0]
 }
-fn default_semantic_sample_rate() -> usize {
-    16000
-}
-fn default_downsample_factor() -> usize {
-    320
-}
+serde_default!(default_semantic_sample_rate, usize, 16000);
+serde_default!(default_downsample_factor, usize, 320);
 
 impl HiggsAudioV2Config {
     pub fn sample_rate(&self) -> usize {
@@ -185,16 +166,36 @@ impl HiggsAudioV2Config {
         (hop as f64 / ratio / self.downsample_factor as f64) as usize
     }
 
+    /// Returns the DAC (acoustic) sub-config.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `acoustic_model_config` is absent from the JSON. Call
+    /// [`try_dac_config`](Self::try_dac_config) for a non-panicking variant.
     pub fn dac_config(&self) -> &DacConfig {
-        self.acoustic_model_config
-            .as_ref()
-            .expect("acoustic_model_config required")
+        self.try_dac_config()
+            .expect("acoustic_model_config is required in audio_tokenizer/config.json")
     }
 
+    /// Returns the HuBERT (semantic) sub-config.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `semantic_model_config` is absent from the JSON. Call
+    /// [`try_hubert_config`](Self::try_hubert_config) for a non-panicking variant.
     pub fn hubert_config(&self) -> &HuBERTConfig {
-        self.semantic_model_config
-            .as_ref()
-            .expect("semantic_model_config required")
+        self.try_hubert_config()
+            .expect("semantic_model_config is required in audio_tokenizer/config.json")
+    }
+
+    /// Non-panicking accessor for the DAC sub-config.
+    pub fn try_dac_config(&self) -> Option<&DacConfig> {
+        self.acoustic_model_config.as_ref()
+    }
+
+    /// Non-panicking accessor for the HuBERT sub-config.
+    pub fn try_hubert_config(&self) -> Option<&HuBERTConfig> {
+        self.semantic_model_config.as_ref()
     }
 }
 
@@ -222,30 +223,18 @@ pub struct DacConfig {
     pub codebook_dim: Option<usize>,
 }
 
-fn default_dac_encoder_hidden() -> usize {
-    64
-}
-fn default_dac_decoder_hidden() -> usize {
-    1024
-}
-fn default_dac_hidden() -> usize {
-    256
-}
+serde_default!(default_dac_encoder_hidden, usize, 64);
+serde_default!(default_dac_decoder_hidden, usize, 1024);
+serde_default!(default_dac_hidden, usize, 256);
 fn default_dac_downsampling() -> Vec<usize> {
     vec![8, 5, 4, 2, 3]
 }
 fn default_dac_upsampling() -> Vec<usize> {
     vec![8, 5, 4, 2, 3]
 }
-fn default_dac_n_codebooks() -> Option<usize> {
-    Some(9)
-}
-fn default_dac_codebook_size() -> Option<usize> {
-    Some(1024)
-}
-fn default_dac_codebook_dim() -> Option<usize> {
-    Some(8)
-}
+serde_default!(default_dac_n_codebooks, Option<usize>, Some(9));
+serde_default!(default_dac_codebook_size, Option<usize>, Some(1024));
+serde_default!(default_dac_codebook_dim, Option<usize>, Some(8));
 
 // ---------------------------------------------------------------------------
 // HuBERT config
@@ -281,24 +270,14 @@ pub struct HuBERTConfig {
     pub conv_bias: bool,
 }
 
-fn default_hubert_hidden() -> usize {
-    768
-}
-fn default_hubert_num_hidden_layers() -> usize {
-    12
-}
-fn default_hubert_num_attention_heads() -> usize {
-    12
-}
-fn default_hubert_intermediate_size() -> usize {
-    3072
-}
+serde_default!(default_hubert_hidden, usize, 768);
+serde_default!(default_hubert_num_hidden_layers, usize, 12);
+serde_default!(default_hubert_num_attention_heads, usize, 12);
+serde_default!(default_hubert_intermediate_size, usize, 3072);
 fn default_hubert_hidden_act() -> String {
     "gelu".to_string()
 }
-fn default_hubert_layer_norm_eps() -> f64 {
-    1e-5
-}
+serde_default!(default_hubert_layer_norm_eps, f64, 1e-5);
 fn default_hubert_feat_extract_norm() -> String {
     "group".to_string()
 }
@@ -311,12 +290,6 @@ fn default_hubert_conv_stride() -> Vec<usize> {
 fn default_hubert_conv_kernel() -> Vec<usize> {
     vec![10, 3, 3, 3, 3, 2, 2]
 }
-fn default_hubert_num_conv_pos_embeddings() -> usize {
-    128
-}
-fn default_hubert_num_conv_pos_embedding_groups() -> usize {
-    16
-}
-fn default_hubert_conv_bias() -> bool {
-    false
-}
+serde_default!(default_hubert_num_conv_pos_embeddings, usize, 128);
+serde_default!(default_hubert_num_conv_pos_embedding_groups, usize, 16);
+serde_default!(default_hubert_conv_bias, bool, false);

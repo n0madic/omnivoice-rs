@@ -146,7 +146,8 @@ impl ResidualVectorQuantization {
 
     /// Decode: codes (num_quantizers, B, T) -> embeddings (B, hidden, T)
     pub fn decode(&self, codes: &Tensor) -> Result<Tensor> {
-        let n = codes.dim(0)?;
+        // Clamp to available quantizers to prevent index-out-of-bounds
+        let n = codes.dim(0)?.min(self.quantizers.len());
         let mut out: Option<Tensor> = None;
         for i in 0..n {
             let indices = codes.i(i)?; // (B, T)

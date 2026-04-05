@@ -105,7 +105,7 @@ pub fn add_punctuation(text: &str) -> String {
         }
     }
 
-    let is_chinese = text.chars().any(|c| ('\u{4e00}'..='\u{9fff}').contains(&c));
+    let is_chinese = text.chars().any(is_cjk);
     if is_chinese {
         format!("{text}\u{3002}") // 。
     } else {
@@ -271,7 +271,8 @@ fn replace_newlines_with_period(s: &str) -> String {
     result
 }
 
-fn is_cjk(c: char) -> bool {
+/// Returns true if `c` is a CJK Unified Ideograph (U+4E00..U+9FFF).
+pub fn is_cjk(c: char) -> bool {
     ('\u{4e00}'..='\u{9fff}').contains(&c)
 }
 

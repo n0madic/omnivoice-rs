@@ -298,7 +298,7 @@ pub fn resolve_instruct(instruct: Option<&str>, use_zh: bool) -> anyhow::Result<
     // Determine separator based on language of the final items.
     let has_zh = normalised
         .iter()
-        .any(|n| n.chars().any(|c| ('\u{4e00}'..='\u{9fff}').contains(&c)));
+        .any(|n| n.chars().any(crate::utils::text::is_cjk));
     let separator = if has_zh { "\u{FF0C}" } else { ", " };
 
     Ok(Some(normalised.join(separator)))
@@ -355,7 +355,7 @@ fn sorted_en_items() -> Vec<&'static str> {
     let mut items: Vec<&str> = ALL_VALID
         .iter()
         .copied()
-        .filter(|s| !s.chars().any(|c| ('\u{4e00}'..='\u{9fff}').contains(&c)))
+        .filter(|s| !s.chars().any(crate::utils::text::is_cjk))
         .collect();
     items.sort();
     items
@@ -365,7 +365,7 @@ fn sorted_zh_items() -> Vec<&'static str> {
     let mut items: Vec<&str> = ALL_VALID
         .iter()
         .copied()
-        .filter(|s| s.chars().any(|c| ('\u{4e00}'..='\u{9fff}').contains(&c)))
+        .filter(|s| s.chars().any(crate::utils::text::is_cjk))
         .collect();
     items.sort();
     items

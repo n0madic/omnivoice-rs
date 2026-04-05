@@ -7,10 +7,10 @@ use tracing::info;
 
 use omnivoice_rs::config::{HiggsAudioV2Config, OmniVoiceConfig};
 use omnivoice_rs::models::higgs_audio_v2::HiggsAudioV2Tokenizer;
-use omnivoice_rs::models::omnivoice::{GenerationConfig, OmniVoice};
+use omnivoice_rs::models::omnivoice::{GenerateRequest, GenerationConfig, OmniVoice};
 use omnivoice_rs::utils::audio::{fade_and_pad, load_wav, remove_silence, save_wav};
 use omnivoice_rs::utils::duration::RuleDurationEstimator;
-use omnivoice_rs::utils::text::{add_punctuation, combine_text};
+use omnivoice_rs::utils::text::{add_punctuation, combine_text, is_cjk};
 
 #[derive(Parser, Debug)]
 #[command(name = "omnivoice-rs", about = "OmniVoice TTS inference (Rust/Candle)")]
@@ -219,6 +219,10 @@ fn main() -> Result<()> {
     // 4. Load OmniVoice model
     info!("Loading OmniVoice model...");
     let model_weights = model_dir.join("model.safetensors");
+    // SAFETY: The safetensors file was either downloaded from HuggingFace Hub
+    // (validated by hf-hub) or provided as a local path by the user. The file
+    // must remain unmodified while memory-mapped. This is the standard candle
+    // pattern for loading model weights.
     let vb = unsafe {
         candle_nn::VarBuilder::from_mmaped_safetensors(&[model_weights], dtype, &device)?
     };
@@ -230,6 +234,7 @@ fn main() -> Result<()> {
     // Python behavior (which also forces audio_tokenizer to CPU for MPS).
     info!("Loading HiggsAudioV2 audio tokenizer (CPU, F32)...");
     let audio_weights = model_dir.join("audio_tokenizer/model.safetensors");
+    // SAFETY: Same as above — file is from HuggingFace or user-supplied local path.
     let audio_vb = unsafe {
         candle_nn::VarBuilder::from_mmaped_safetensors(&[audio_weights], DType::F32, &Device::Cpu)?
     };
@@ -334,10 +339,7 @@ fn main() -> Result<()> {
     info!("Target audio tokens: {num_target_tokens}");
 
     // 8. Validate instruct and resolve language
-    let use_zh = args
-        .text
-        .chars()
-        .any(|c| ('\u{4e00}'..='\u{9fff}').contains(&c));
+    let use_zh = args.text.chars().any(is_cjk);
     let instruct = match &args.instruct {
         Some(s) => omnivoice_rs::utils::voice_design::resolve_instruct(Some(s), use_zh)?,
         None => None,
@@ -361,21 +363,21 @@ fn main() -> Result<()> {
         "Generating audio for: {}...",
         &args.text.chars().take(80).collect::<String>()
     );
-    let chunk_tokens = model.generate(
-        &tokenizer,
-        &full_text,
+    let chunk_tokens = model.generate(&GenerateRequest {
+        tokenizer: &tokenizer,
+        full_text: &full_text,
         num_target_tokens,
-        ref_audio_tokens.as_ref(),
-        ref_text.as_deref(),
-        language.as_deref(),
-        instruct.as_deref(),
-        &gen_config,
+        ref_audio_tokens: ref_audio_tokens.as_ref(),
+        ref_text: ref_text.as_deref(),
+        lang: language.as_deref(),
+        instruct: instruct.as_deref(),
+        gen_config: &gen_config,
         frame_rate,
-        args.speed,
-        &duration_estimator,
-        &device,
+        speed: args.speed,
+        duration_estimator: &duration_estimator,
+        device: &device,
         dtype,
-    )?;
+    })?;
 
     // 9. Decode token chunks to waveform (audio tokenizer runs on CPU)
     info!("Decoding {} audio chunk(s)...", chunk_tokens.len());

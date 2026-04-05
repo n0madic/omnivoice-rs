@@ -66,6 +66,27 @@ impl Default for GenerationConfig {
 }
 
 // ---------------------------------------------------------------------------
+// Generate Request
+// ---------------------------------------------------------------------------
+
+/// Groups the parameters for [`OmniVoice::generate`] to keep call sites clean.
+pub struct GenerateRequest<'a> {
+    pub tokenizer: &'a tokenizers::Tokenizer,
+    pub full_text: &'a str,
+    pub num_target_tokens: usize,
+    pub ref_audio_tokens: Option<&'a Tensor>,
+    pub ref_text: Option<&'a str>,
+    pub lang: Option<&'a str>,
+    pub instruct: Option<&'a str>,
+    pub gen_config: &'a GenerationConfig,
+    pub frame_rate: usize,
+    pub speed: f64,
+    pub duration_estimator: &'a crate::utils::duration::RuleDurationEstimator,
+    pub device: &'a Device,
+    pub dtype: DType,
+}
+
+// ---------------------------------------------------------------------------
 // OmniVoice Model
 // ---------------------------------------------------------------------------
 
@@ -258,99 +279,85 @@ impl OmniVoice {
     ///
     /// Returns a list of chunk token tensors (each shape `(C, T)`).
     /// For short texts, returns a single-element list.
-    #[allow(clippy::too_many_arguments)]
-    pub fn generate(
-        &self,
-        tokenizer: &tokenizers::Tokenizer,
-        full_text: &str,
-        num_target_tokens: usize,
-        ref_audio_tokens: Option<&Tensor>,
-        ref_text: Option<&str>,
-        lang: Option<&str>,
-        instruct: Option<&str>,
-        gen_config: &GenerationConfig,
-        frame_rate: usize,
-        speed: f64,
-        duration_estimator: &crate::utils::duration::RuleDurationEstimator,
-        device: &Device,
-        dtype: DType,
-    ) -> Result<Vec<Tensor>> {
-        let threshold_tokens = (gen_config.audio_chunk_threshold * frame_rate as f64) as usize;
+    pub fn generate(&self, req: &GenerateRequest<'_>) -> Result<Vec<Tensor>> {
+        let threshold_tokens =
+            (req.gen_config.audio_chunk_threshold * req.frame_rate as f64) as usize;
 
-        if num_target_tokens <= threshold_tokens {
-            // Short text — single chunk
+        if req.num_target_tokens <= threshold_tokens {
             let tokens = self.generate_iterative(
-                tokenizer,
-                full_text,
-                num_target_tokens,
-                ref_audio_tokens,
-                lang,
-                instruct,
-                gen_config,
-                device,
-                dtype,
+                req.tokenizer,
+                req.full_text,
+                req.num_target_tokens,
+                req.ref_audio_tokens,
+                req.lang,
+                req.instruct,
+                req.gen_config,
+                req.device,
+                req.dtype,
             )?;
             return Ok(vec![tokens]);
         }
 
         // Long text — split into chunks
-        let avg_tokens_per_char = num_target_tokens as f64 / full_text.len().max(1) as f64;
-        let text_chunk_len =
-            (gen_config.audio_chunk_duration * frame_rate as f64 / avg_tokens_per_char) as usize;
+        let avg_tokens_per_char = req.num_target_tokens as f64 / req.full_text.len().max(1) as f64;
+        let text_chunk_len = (req.gen_config.audio_chunk_duration * req.frame_rate as f64
+            / avg_tokens_per_char) as usize;
 
-        let chunks = crate::utils::text::chunk_text_punctuation(full_text, text_chunk_len, Some(3));
+        let chunks =
+            crate::utils::text::chunk_text_punctuation(req.full_text, text_chunk_len, Some(3));
 
         tracing::info!("Long text: splitting into {} chunks", chunks.len());
 
-        let has_ref = ref_audio_tokens.is_some();
+        let has_ref = req.ref_audio_tokens.is_some();
         let mut chunk_tokens: Vec<Tensor> = Vec::with_capacity(chunks.len());
 
         if has_ref {
-            // Voice cloning: use the same ref_audio for all chunks
             for (ci, chunk_text) in chunks.iter().enumerate() {
-                let chunk_full = crate::utils::text::combine_text(chunk_text, ref_text);
+                let chunk_full = crate::utils::text::combine_text(chunk_text, req.ref_text);
                 let chunk_target = self.estimate_target_tokens(
                     chunk_text,
-                    ref_text,
-                    ref_audio_tokens.map(|t| t.dim(1).unwrap_or(0)),
-                    speed,
-                    duration_estimator,
+                    req.ref_text,
+                    req.ref_audio_tokens.map(|t| t.dim(1).unwrap_or(0)),
+                    req.speed,
+                    req.duration_estimator,
                 );
                 tracing::debug!("Chunk {ci}: \"{chunk_text}\" -> {chunk_target} tokens");
                 let tokens = self.generate_iterative(
-                    tokenizer,
+                    req.tokenizer,
                     &chunk_full,
                     chunk_target,
-                    ref_audio_tokens,
-                    lang,
-                    instruct,
-                    gen_config,
-                    device,
-                    dtype,
+                    req.ref_audio_tokens,
+                    req.lang,
+                    req.instruct,
+                    req.gen_config,
+                    req.device,
+                    req.dtype,
                 )?;
                 chunk_tokens.push(tokens);
             }
         } else {
-            // No ref audio: generate chunk 0 without ref, then use chunk 0 output
-            // as reference for subsequent chunks (voice consistency).
             let chunk0_full = crate::utils::text::combine_text(&chunks[0], None);
-            let chunk0_target =
-                self.estimate_target_tokens(&chunks[0], None, None, speed, duration_estimator);
+            let chunk0_target = self.estimate_target_tokens(
+                &chunks[0],
+                None,
+                None,
+                req.speed,
+                req.duration_estimator,
+            );
             tracing::debug!("Chunk 0: \"{}\" -> {} tokens", &chunks[0], chunk0_target);
             let first_tokens = self.generate_iterative(
-                tokenizer,
+                req.tokenizer,
                 &chunk0_full,
                 chunk0_target,
                 None,
-                lang,
-                instruct,
-                gen_config,
-                device,
-                dtype,
+                req.lang,
+                req.instruct,
+                req.gen_config,
+                req.device,
+                req.dtype,
             )?;
             chunk_tokens.push(first_tokens);
 
-            // Subsequent chunks use chunk 0 as ref
             for (ci, chunk_text) in chunks.iter().enumerate().skip(1) {
                 let ref_tok = &chunk_tokens[0];
                 let chunk_full = crate::utils::text::combine_text(chunk_text, Some(&chunks[0]));
@@ -358,20 +365,20 @@ impl OmniVoice {
                     chunk_text,
                     Some(&chunks[0]),
                     Some(ref_tok.dim(1)?),
-                    speed,
-                    duration_estimator,
+                    req.speed,
+                    req.duration_estimator,
                 );
                 tracing::debug!("Chunk {ci}: \"{chunk_text}\" -> {chunk_target} tokens");
                 let tokens = self.generate_iterative(
-                    tokenizer,
+                    req.tokenizer,
                     &chunk_full,
                     chunk_target,
                     Some(ref_tok),
-                    lang,
-                    instruct,
-                    gen_config,
-                    device,
-                    dtype,
+                    req.lang,
+                    req.instruct,
+                    req.gen_config,
+                    req.device,
+                    req.dtype,
                 )?;
                 chunk_tokens.push(tokens);
             }
@@ -432,66 +439,28 @@ impl OmniVoice {
 
         let c_len = cond_input_ids.dim(2)?;
         let t_len = num_target_tokens;
-
-        // Unconditional: only target tokens
-        let uncond_input_ids = cond_input_ids.i((.., .., c_len - t_len..c_len))?;
-        let uncond_audio_mask = cond_audio_mask.i((.., c_len - t_len..c_len))?;
-
-        // Pad unconditional to same length as conditional
-        let max_len = c_len;
-        let u_len = t_len;
-
-        // Build batched tensors (2, C, max_len) — cond + uncond
+        let prefix_len = c_len - t_len;
         let pad_id = mask_id as i64;
 
-        // Batch input_ids: (2, C, max_len) — build by concatenation
-        // Conditional: pad uncond to max_len
-        let cond_padded = if c_len < max_len {
-            let pad = full_i64(pad_id, (1, c, max_len - c_len), device)?;
-            Tensor::cat(&[&cond_input_ids, &pad], 2)?
-        } else {
-            cond_input_ids.clone()
-        };
-        // Unconditional: pad to max_len
-        let uncond_padded = if u_len < max_len {
-            let pad = full_i64(pad_id, (1, c, max_len - u_len), device)?;
-            Tensor::cat(&[&uncond_input_ids, &pad], 2)?
-        } else {
-            uncond_input_ids.clone()
-        };
-        let mut batch_input_ids = Tensor::cat(&[&cond_padded, &uncond_padded], 0)?;
+        // Padding tensor for unconditional branch (reused each iteration)
+        let uncond_pad = full_i64(pad_id, (1, c, prefix_len), device)?;
 
-        // Batch audio_mask: (2, max_len)
-        let cond_amask_padded = if c_len < max_len {
-            let pad = Tensor::zeros((1, max_len - c_len), DType::U8, device)?;
-            Tensor::cat(&[&cond_audio_mask, &pad], 1)?
-        } else {
-            cond_audio_mask.clone()
-        };
-        let uncond_amask_padded = if u_len < max_len {
-            let pad = Tensor::zeros((1, max_len - u_len), DType::U8, device)?;
-            Tensor::cat(&[&uncond_audio_mask, &pad], 1)?
-        } else {
-            uncond_audio_mask.clone()
-        };
-        let batch_audio_mask = Tensor::cat(&[&cond_amask_padded, &uncond_amask_padded], 0)?;
+        // Audio mask: cond uses full mask, uncond padded with zeros
+        let uncond_audio_mask = cond_audio_mask.i((.., prefix_len..c_len))?;
+        let uncond_amask_pad = Tensor::zeros((1, prefix_len), DType::U8, device)?;
+        let uncond_amask_padded = Tensor::cat(&[&uncond_audio_mask, &uncond_amask_pad], 1)?;
+        let batch_audio_mask = Tensor::cat(&[&cond_audio_mask, &uncond_amask_padded], 0)?;
 
-        // Attention masks: (2, 1, max_len, max_len) float
+        // Attention masks: (2, 1, c_len, c_len) float
         let minf = f32::NEG_INFINITY;
-        // Conditional: full attention within c_len
-        let cond_mask_data: Vec<f32> = (0..max_len)
-            .flat_map(|i| {
-                (0..max_len).map(move |j| if i < c_len && j < c_len { 0.0 } else { minf })
-            })
-            .collect();
-        let cond_mask =
-            Tensor::from_vec(cond_mask_data, (1, 1, max_len, max_len), device)?.to_dtype(dtype)?;
+        // Conditional: full bidirectional attention within c_len
+        let cond_mask = Tensor::zeros((1, 1, c_len, c_len), dtype, device)?;
 
-        // Unconditional: attend within u_len, self-attend for padding
-        let uncond_mask_data: Vec<f32> = (0..max_len)
+        // Unconditional: attend within t_len, self-attend for padding positions
+        let uncond_mask_data: Vec<f32> = (0..c_len)
             .flat_map(|i| {
-                (0..max_len).map(move |j| {
-                    if (i < u_len && j < u_len) || (i == j && i >= u_len) {
+                (0..c_len).map(move |j| {
+                    if (i < t_len && j < t_len) || (i == j && i >= t_len) {
                         0.0
                     } else {
                         minf
@@ -499,8 +468,8 @@ impl OmniVoice {
                 })
             })
             .collect();
-        let uncond_mask = Tensor::from_vec(uncond_mask_data, (1, 1, max_len, max_len), device)?
-            .to_dtype(dtype)?;
+        let uncond_mask =
+            Tensor::from_vec(uncond_mask_data, (1, 1, c_len, c_len), device)?.to_dtype(dtype)?;
 
         let batch_attn_mask = Tensor::cat(&[&cond_mask, &uncond_mask], 0)?;
 
@@ -508,7 +477,6 @@ impl OmniVoice {
         let mut tokens = full_i64(mask_id as i64, (1, c, t_len), device)?;
 
         // Compute unmasking schedule
-        // Python: _get_time_steps(num_step=gen_config.num_step + 1) → linspace of num_step+2 points
         let timesteps = get_time_steps(0.0, 1.0, gen_config.num_step + 1, gen_config.t_shift);
         let total_mask = t_len * c;
         let mut schedule = Vec::with_capacity(gen_config.num_step);
@@ -531,54 +499,51 @@ impl OmniVoice {
             .collect();
         let penalty = Tensor::from_vec(penalty_data, (1, c, 1), device)?;
 
+        // Precompute mask_id and zero tensors on CPU for per-step comparisons.
+        // Shape must match flat_tokens ([total_mask]) because Candle eq/ne do not broadcast.
+        let mask_id_cpu = full_i64(mask_id as i64, total_mask, &Device::Cpu)?;
+        let zeros_total = Tensor::zeros(total_mask, DType::U32, &Device::Cpu)?;
+
         // Iterative generation loop
-        for &k in schedule.iter().take(gen_config.num_step) {
+        for (step_idx, &k) in schedule.iter().enumerate() {
             if k == 0 {
                 continue;
             }
 
-            // Update batch_input_ids with current tokens
-            // Rebuild batch by replacing target sections
-            // Conditional: [prefix | tokens] (cond prefix is 0..c_len-t_len, then tokens)
-            let cond_prefix = batch_input_ids.i((0..1, .., 0..c_len - t_len))?;
-            let cond_suffix_pad = if c_len < max_len {
-                let pad = full_i64(pad_id, (1, c, max_len - c_len), device)?;
-                Tensor::cat(&[&cond_prefix, &tokens, &pad], 2)?
-            } else {
-                Tensor::cat(&[&cond_prefix, &tokens], 2)?
-            };
-            // Unconditional: [tokens | padding]
-            let uncond_row = if t_len < max_len {
-                let pad = full_i64(pad_id, (1, c, max_len - t_len), device)?;
-                Tensor::cat(&[&tokens, &pad], 2)?
-            } else {
-                tokens.clone()
-            };
-            batch_input_ids = Tensor::cat(&[&cond_suffix_pad, &uncond_row], 0)?;
+            if step_idx % 8 == 0 || step_idx == gen_config.num_step - 1 {
+                tracing::info!("Decoding step {}/{}", step_idx + 1, gen_config.num_step);
+            }
+
+            // Rebuild batch_input_ids: cond = [prefix | tokens], uncond = [tokens | pad]
+            let cond_prefix = cond_input_ids.i((.., .., 0..prefix_len))?;
+            let cond_row = Tensor::cat(&[&cond_prefix, &tokens], 2)?;
+            let uncond_row = Tensor::cat(&[&tokens, &uncond_pad], 2)?;
+            let batch_input_ids = Tensor::cat(&[&cond_row, &uncond_row], 0)?;
 
             // Forward pass
             let batch_logits =
-                self.forward(&batch_input_ids, &batch_audio_mask, Some(&batch_attn_mask))?; // (2, C, max_len, V)
+                self.forward(&batch_input_ids, &batch_audio_mask, Some(&batch_attn_mask))?;
 
             // Extract target logits
-            let c_logits = batch_logits.i((0..1, .., c_len - t_len..c_len, ..))?; // (1, C, T, V)
+            let c_logits = batch_logits.i((0..1, .., prefix_len..c_len, ..))?;
             let u_logits = batch_logits.i((1..2, .., 0..t_len, ..))?;
 
             // Predict tokens with CFG
             let (pred_tokens, confidence_scores) =
                 self.predict_tokens_with_scoring(&c_logits, &u_logits, gen_config, device)?;
 
-            // Apply layer penalty: scores - layer_id * factor
+            // Apply layer penalty and optional Gumbel noise
             let scores = confidence_scores.broadcast_sub(&penalty)?;
-
-            // Gumbel sampling for position selection
             let scores = if gen_config.position_temperature > 0.0 {
                 gumbel_sample(&scores, gen_config.position_temperature)?
             } else {
                 scores
             };
 
-            // Move to CPU for scoring and token update (safe on all backends)
+            // --- On-device scoring and token update ---
+            // Move scores/predictions to CPU for the masking + topk + scatter.
+            // The data is tiny (C*T ≤ ~4000 elements) so transfer overhead is
+            // negligible compared to the LLM forward pass.
             let flat_scores = scores
                 .flatten_all()?
                 .to_dtype(DType::F32)?
@@ -593,8 +558,7 @@ impl OmniVoice {
                 .to_device(&Device::Cpu)?;
 
             // Mask out already-unmasked positions (set -inf where tokens != mask_id)
-            let mask_id_tensor = full_i64(mask_id as i64, flat_tokens.shape(), &Device::Cpu)?;
-            let is_mask = flat_tokens.eq(&mask_id_tensor)?;
+            let is_mask = flat_tokens.eq(&mask_id_cpu)?;
             let neg_inf = full_f32(f32::NEG_INFINITY, flat_scores.shape(), &Device::Cpu)?;
             let masked_scores = is_mask.where_cond(&flat_scores, &neg_inf)?;
 
@@ -602,18 +566,14 @@ impl OmniVoice {
             let topk_out = masked_scores.topk(k)?;
             let topk_indices = topk_out.indices;
 
-            // Update tokens
-            let mut tokens_vec: Vec<i64> = flat_tokens.to_vec1()?;
-            let pred_vec: Vec<i64> = flat_pred.to_vec1()?;
-            let indices_vec: Vec<u32> = topk_indices.to_vec1()?;
+            // Scatter predicted tokens at top-k positions; keep current elsewhere
+            let zeros_all = Tensor::zeros(total_mask, DType::U32, &Device::Cpu)?;
+            let ones_k = Tensor::ones(k, DType::U32, &Device::Cpu)?;
+            let unmask = zeros_all.scatter_add(&topk_indices, &ones_k, 0)?;
+            let unmask_bool = unmask.ne(&zeros_total)?;
+            let new_flat = unmask_bool.where_cond(&flat_pred, &flat_tokens)?;
 
-            for &idx in &indices_vec {
-                tokens_vec[idx as usize] = pred_vec[idx as usize];
-            }
-
-            // Move tokens back to model device
-            tokens =
-                Tensor::from_vec(tokens_vec, (1, c, t_len), &Device::Cpu)?.to_device(device)?;
+            tokens = new_flat.reshape((1, c, t_len))?.to_device(device)?;
         }
 
         // Return (C, T) — squeeze batch dim
@@ -646,9 +606,13 @@ impl OmniVoice {
         let log_probs = log_probs.broadcast_add(&mask_tensor)?;
 
         let pred_tokens = if gen_config.class_temperature > 0.0 {
-            let filtered = filter_top_k(&log_probs, 0.1)?;
+            // Move to CPU/F32 for stochastic sampling — Metal has known issues
+            // with arg_sort, scatter, and F16 epsilon underflow in Gumbel noise.
+            // Data is tiny (~C*T*vocab ≈ 500K elements), so overhead is negligible.
+            let lp_cpu = log_probs.to_dtype(DType::F32)?.to_device(&Device::Cpu)?;
+            let filtered = filter_top_k(&lp_cpu, 0.1)?;
             let sampled = gumbel_sample(&filtered, gen_config.class_temperature)?;
-            sampled.argmax(D::Minus1)?
+            sampled.argmax(D::Minus1)?.to_device(device)?
         } else {
             log_probs.argmax(D::Minus1)?
         };

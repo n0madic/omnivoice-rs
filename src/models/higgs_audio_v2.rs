@@ -13,14 +13,17 @@ use crate::models::semantic_codec::{SemanticDecoder, SemanticEncoder};
 use crate::utils::audio::resample;
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct HiggsAudioV2Tokenizer {
     acoustic_encoder: DacEncoder,
     acoustic_decoder: DacDecoder,
     semantic_model: HuBERTModel,
     encoder_semantic: SemanticEncoder,
+    /// Loaded from weights for completeness; not used in TTS inference decode path.
+    #[allow(dead_code)]
     decoder_semantic: SemanticDecoder,
     fc: candle_nn::Linear,
+    /// Loaded from weights for completeness; semantic decode projection.
+    #[allow(dead_code)]
     fc1: candle_nn::Linear,
     fc2: candle_nn::Linear,
     quantizer: ResidualVectorQuantization,

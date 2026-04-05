@@ -330,8 +330,6 @@ pub struct Qwen3Bidirectional {
     layers: Vec<DecoderLayer>,
     norm: RmsNorm,
     device: Device,
-    #[allow(dead_code)]
-    dtype: DType,
 }
 
 impl Qwen3Bidirectional {
@@ -349,7 +347,6 @@ impl Qwen3Bidirectional {
             layers,
             norm: RmsNorm::new(cfg.hidden_size, cfg.rms_norm_eps, vb.pp("norm"))?,
             device: vb.device().clone(),
-            dtype: vb.dtype(),
         })
     }
 

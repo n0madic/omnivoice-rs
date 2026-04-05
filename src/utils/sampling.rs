@@ -57,17 +57,21 @@ pub fn get_time_steps(t_start: f64, t_end: f64, num_step: usize, t_shift: f64) -
 /// Computes: `logits / temperature + gumbel_noise` where
 /// `gumbel_noise = -log(-log(u + eps) + eps)` with `u ~ Uniform(0,1)`.
 ///
-/// The result has the same shape as `logits`.
+/// The computation is always performed in F32 to avoid eps underflow in F16
+/// (1e-10 < F16 minimum subnormal ≈ 5.96e-8, which would corrupt the Gumbel
+/// transform and produce random noise).  The result is cast back to the
+/// original dtype before returning.
 pub fn gumbel_sample(logits: &Tensor, temperature: f64) -> Result<Tensor> {
-    let scaled = (logits / temperature)?;
+    let orig_dtype = logits.dtype();
+    let scaled = (logits.to_dtype(DType::F32)? / temperature)?;
 
-    // Generate uniform random noise in (0, 1).
+    // Generate uniform random noise in (0, 1) in F32.
     let u = Tensor::rand_like(&scaled, 0.0, 1.0)?;
 
     // gumbel = -log(-log(u + eps) + eps)
     let gumbel_noise = ((u + 1e-10)?.log()?.neg()? + 1e-10)?.log()?.neg()?;
 
-    scaled + gumbel_noise
+    (scaled + gumbel_noise)?.to_dtype(orig_dtype)
 }
 
 /// Filter logits to keep only the top-k values (by ratio of vocabulary size).
@@ -85,30 +89,25 @@ pub fn filter_top_k(logits: &Tensor, ratio: f64) -> Result<Tensor> {
         .max(1)
         .min(vocab_size);
 
-    // Flatten leading dimensions to work on 2-D.
+    // Flatten leading dimensions to work on 2-D: (rows, vocab_size)
     let shape = logits.shape().clone();
     let leading: usize = shape.dims().iter().rev().skip(1).product();
     let flat = logits.reshape((leading, vocab_size))?;
+    let device = flat.device();
+    let dtype = flat.dtype();
 
-    // Sort descending along last dim to find the k-th threshold value.
+    // Sort descending to find top-k indices per row
     let sorted_indices = flat.arg_sort_last_dim(false)?;
+    let topk_indices = sorted_indices.narrow(1, 0, k)?.contiguous()?;
 
-    // Build output: positions in the top-k keep their value, rest get -inf.
-    let flat_f32 = flat.to_dtype(DType::F32)?;
-    let mut output_data = vec![f32::NEG_INFINITY; leading * vocab_size];
+    // Gather the top-k values from the original logits
+    let topk_values = flat.gather(&topk_indices, 1)?;
 
-    for row in 0..leading {
-        let row_vals = flat_f32.get(row)?.to_vec1::<f32>()?;
-        let row_indices = sorted_indices.get(row)?.to_vec1::<u32>()?;
+    // Build result: start with -inf everywhere, scatter top-k values back
+    let neg_inf =
+        Tensor::full(f32::NEG_INFINITY, (leading, vocab_size), device)?.to_dtype(dtype)?;
+    let result = neg_inf.scatter(&topk_indices, &topk_values, 1)?;
 
-        for &idx in row_indices.iter().take(k) {
-            let idx = idx as usize;
-            output_data[row * vocab_size + idx] = row_vals[idx];
-        }
-    }
-
-    let result = Tensor::from_vec(output_data, (leading, vocab_size), logits.device())?;
-    let result = result.to_dtype(logits.dtype())?;
     result.reshape(shape)
 }
 

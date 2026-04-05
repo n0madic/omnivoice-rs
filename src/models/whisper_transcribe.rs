@@ -44,6 +44,8 @@ impl WhisperTranscriber {
 
         let config: whisper::Config = serde_json::from_reader(std::fs::File::open(&config_path)?)?;
 
+        // SAFETY: Weights file downloaded from HuggingFace Hub and remains
+        // unmodified while memory-mapped.
         let vb =
             unsafe { VarBuilder::from_mmaped_safetensors(&[weights_path], DType::F32, device)? };
         let model = whisper::model::Whisper::load(&vb, config.clone())?;
@@ -113,14 +115,14 @@ impl WhisperTranscriber {
         let suppress = &self.model.config.suppress_tokens;
 
         for _step in 0..max_decode_steps {
+            // Re-encode the full sequence each step (flush=true resets KV cache).
+            // This is O(n²) but Whisper runs once per invocation so perf is fine.
+            // Candle's Whisper KV cache (flush=false) doesn't accumulate context
+            // correctly, producing truncated transcriptions.
             let token_tensor = Tensor::from_vec(tokens.clone(), (1, tokens.len()), &self.device)?;
 
             let logits = {
-                let decoder_out = self.model.decoder.forward(
-                    &token_tensor,
-                    &encoded,
-                    tokens.len() == 3, // flush KV cache on first step
-                )?;
+                let decoder_out = self.model.decoder.forward(&token_tensor, &encoded, true)?;
                 self.model.decoder.final_linear(&decoder_out)?
             };
 
